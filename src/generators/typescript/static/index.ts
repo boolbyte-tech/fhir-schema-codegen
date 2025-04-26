@@ -7,6 +7,7 @@ import {
   type Options,
   type ResponsePromise,
 } from './http-client';
+import { SmartAuth } from './smart-auth';
 import type {
   ResourceTypeMap,
   SearchParams,
@@ -556,31 +557,68 @@ export type BasicAuthorization = {
   method: 'basic';
   credentials: { username: string; password: string };
 };
+
 export type ResourceOwnerAuthorization = {
   method: 'resource-owner';
   client: { id: string; secret: string };
   storage: TokenStorage;
 };
 
+export type SmartAuthorization = {
+  method: 'smart';
+  clientId: string;
+  clientSecret?: string;
+  redirectUri: string;
+  scope: string;
+  launch?: string;
+  authorizeUrl?: string;
+  tokenUrl?: string;
+  aud?: string;
+  storage: TokenStorage;
+};
+
 function isBasic(
-  params: BasicAuthorization | ResourceOwnerAuthorization,
+  params: BasicAuthorization | ResourceOwnerAuthorization | SmartAuthorization,
 ): params is BasicAuthorization {
   return params.method === 'basic';
 }
 
 function isResourceOwner(
-  params: BasicAuthorization | ResourceOwnerAuthorization,
+  params: BasicAuthorization | ResourceOwnerAuthorization | SmartAuthorization,
 ): params is ResourceOwnerAuthorization {
   return params.method === 'resource-owner';
 }
 
-export class Client<T extends BasicAuthorization | ResourceOwnerAuthorization> {
+function isSmart(
+  params: BasicAuthorization | ResourceOwnerAuthorization | SmartAuthorization,
+): params is SmartAuthorization {
+  return params.method === 'smart';
+}
+
+export class Client<T extends BasicAuthorization | ResourceOwnerAuthorization | SmartAuthorization> {
   private client: HttpClientInstance;
   private config: { auth: T };
+  private smartAuth: SmartAuth | null = null;
   task: Task;
   workflow: Workflow;
   constructor(baseURL: string, config: { auth: T }) {
     this.config = config;
+
+    // Initialize SMART auth if configured
+    if (isSmart(config.auth)) {
+      this.smartAuth = new SmartAuth({
+        serverUrl: baseURL,
+        clientId: config.auth.clientId,
+        clientSecret: config.auth.clientSecret,
+        redirectUri: config.auth.redirectUri,
+        scope: config.auth.scope,
+        launch: config.auth.launch,
+        authorizeUrl: config.auth.authorizeUrl,
+        tokenUrl: config.auth.tokenUrl,
+        aud: config.auth.aud,
+      });
+    }
+
     const client = http.create({
       prefixUrl: baseURL,
       throwHttpErrors: true,
@@ -595,6 +633,24 @@ export class Client<T extends BasicAuthorization | ResourceOwnerAuthorization> {
             if (isResourceOwner(config.auth)) {
               const token = config.auth.storage.get();
               if (token) request.headers.set('Authorization', `Bearer ${token}`);
+            }
+            
+            if (isSmart(config.auth) && this.smartAuth) {
+              // Skip auth for token endpoint and discovery endpoint
+              const url = new URL(request.url);
+              const isAuthEndpoint = 
+                url.pathname.endsWith('/token') || 
+                url.pathname.endsWith('/authorize') || 
+                url.pathname.endsWith('/metadata');
+              
+              if (!isAuthEndpoint) {
+                try {
+                  const token = await this.smartAuth.getAccessToken();
+                  request.headers.set('Authorization', `Bearer ${token}`);
+                } catch (error) {
+                  console.error('Failed to get SMART access token:', error);
+                }
+              }
             }
             
             return request;
@@ -620,7 +676,15 @@ export class Client<T extends BasicAuthorization | ResourceOwnerAuthorization> {
       };
     }
 
-    throw new Error('');
+    if (isSmart(this.config.auth) && this.smartAuth) {
+      return {
+        ...this.config.auth,
+        authorize: () => this.smartAuth!.authorize(),
+        handleCallback: (callbackUrl: string) => this.smartAuth!.handleCallback(callbackUrl),
+      };
+    }
+
+    throw new Error('Invalid authorization configuration');
   }
 
   // переделать на reduce и добавить полей

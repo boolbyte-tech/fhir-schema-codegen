@@ -357,3 +357,8 @@ To create a new generator for a language:
 4. Add your generator to the choices in the CLI in `src/cli.ts`
 
 Alternatively, you can use the `create-generator` command to create a custom generator outside the main codebase.
+
+
+node dist/cli.js generate --help
+
+npx ts-node src/cli.ts generate --help
